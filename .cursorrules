@@ -1,0 +1,33 @@
+# Lightroom MCP — Cursor project rules
+
+## Project overview
+
+- **lightroom-mcp** bridges Adobe Lightroom Classic and MCP-capable AI agents (e.g. Cursor).
+- **lightroom-plugin.lrplugin/** — Lua plugin (Lightroom SDK). Runs inside Lightroom, listens on `localhost:54321`, handles JSON-RPC 2.0.
+- **mcp-server/** — Python FastMCP server. Connects to the plugin and exposes MCP tools.
+
+## Codebase conventions
+
+### Lightroom plugin (Lua)
+
+- Lua 5.1–compatible; uses Lightroom SDK (e.g. `LrTasks`, `LrSocket`, `LrHttp`, `LrApplication`, `LrCatalog`).
+- Plugin entry points: `Info.lua` → `Init.lua` / `Shutdown.lua`. `Server.lua` runs the TCP server; `CommandHandlers.lua` implements command logic.
+- Use `JSON.lua` for encoding/decoding; avoid external dependencies.
+- Log via `LrLogger` or `LrFunctionContext.postAsyncTask` as appropriate for the SDK.
+
+### MCP server (Python)
+
+- Python 3.10+. FastMCP for tools; `lrc_client` talks to the plugin over TCP (`localhost:54321`).
+- Tools return `str` (often JSON); errors use `"Error: ..."` prefix. See `agents.md` for tool contracts.
+- Use `requirements.txt` for dependencies; run the server with `python server.py` from `mcp-server/` (with venv activated).
+
+## When editing
+
+- **Plugin:** Changing `Info.lua`, `Init.lua`, or `Shutdown.lua` may require restarting Lightroom.
+- **MCP server:** Restart the MCP server (or Cursor’s MCP client) after changing `server.py` or `lrc_client.py`.
+- **Tool behavior:** Update `agents.md` when adding/removing tools or changing semantics.
+
+## References
+
+- **agents.md** — MCP tools, parameters, return values, and agent workflows.
+- **README.md** — Setup, usage, troubleshooting.
