@@ -77,7 +77,14 @@ broker_stats = {
 stats_lock = threading.Lock()
 
 # History file path
-HISTORY_FILE = os.path.join(os.path.dirname(__file__), "broker_history.json")
+if getattr(sys, 'frozen', False):
+    # If running as compiled exe, store history in same directory as exe
+    base_dir = os.path.dirname(sys.executable)
+else:
+    # If running as script, store in same directory as script
+    base_dir = os.path.dirname(__file__)
+
+HISTORY_FILE = os.path.join(base_dir, "broker_history.json")
 HISTORY_AUTO_SAVE = True  # Auto-save history after each request
 
 # ============================================================================

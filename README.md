@@ -4,20 +4,27 @@ Bridge between [Adobe Lightroom Classic](https://www.adobe.com/products/photosho
 
 ## Architecture
 
-- **Lightroom Plugin** (`lightroom-plugin.lrplugin/`) — Lua plugin running inside Lightroom Classic. Listens on `localhost:8085` (HTTP) and `localhost:8086` (Socket).
-- **MCP Server** (`mcp-server/`) — Python [FastMCP](https://github.com/jlowin/fastmcp) server that exposes Lightroom as MCP tools and connects to the plugin.
+- **Lightroom Plugin** (`lightroom-plugin.lrplugin/`) — Lua plugin running inside Lightroom Classic.
+  - Connects to the Broker via Socket (port 8086) or HTTP polling.
+- **MCP Broker** (`mcp-server/broker.py`) — A lightweight Flask server that acts as a bridge.
+  - Relays requests between the Python MCP server and the Lua plugin.
+  - Provides a dashboard at `http://localhost:8085`.
+- **MCP Server** (`mcp-server/server.py`) — Python [FastMCP](https://github.com/jlowin/fastmcp) server.
+  - Exposes Lightroom tools to Cursor/Claude.
+  - Communicates with the Broker via HTTP.
 
-```
-┌─────────────────┐     MCP      ┌──────────────┐  HTTP :8085  ┌─────────────────────┐
-│ Cursor / Agent  │ ◄──────────► │ MCP Server   │ ◄──────────► │ Lightroom + Plugin  │
-└─────────────────┘              └──────────────┘              └─────────────────────┘
+```mermaid
+graph LR
+    Agent[Cursor / Agent] <-->|MCP| Server[MCP Server]
+    Server <-->|HTTP| Broker[Broker :8085]
+    Broker <-->|Socket :8086| Plugin[Lightroom Plugin]
 ```
 
 ## Prerequisites
 
 - **Adobe Lightroom Classic** (LrSdk 10.0+)
-- **Python 3.10+** (for the MCP server)
-- **Lightroom** and **MCP server** both running, with the plugin loaded
+- **Python 3.10+** (for the MCP server and Broker)
+- **Lightroom** running with the plugin enabled
 
 ## Setup
 
@@ -26,100 +33,85 @@ Bridge between [Adobe Lightroom Classic](https://www.adobe.com/products/photosho
 1. Copy `lightroom-plugin.lrplugin` into your Lightroom plugins folder:
    - **macOS:** `~/Library/Application Support/Adobe/Lightroom/Modules/`
    - **Windows:** `%APPDATA%\Adobe\Lightroom\Modules\`
-2. In Lightroom: **File → Plug-in Manager → Add** and select the plugin folder, or place it in **Modules** and restart Lightroom.
-3. Ensure the plugin is **Enabled**. It starts a server on port **8085** (HTTP) and **8086** (Socket) when Lightroom launches.
+2. In Lightroom: **File → Plug-in Manager → Add** and select the plugin folder.
+3. Ensure the plugin is **Enabled**. It will attempt to connect to the Broker on port 8086.
 
-### 2. MCP server (Python)
+### 2. Configure & Run MCP Server
 
-```bash
-cd mcp-server
-python -m venv .venv
-.venv\Scripts\activate   # Windows
-# source .venv/bin/activate   # macOS / Linux
-pip install -r requirements.txt
-```
+The MCP server handles starting the Broker automatically.
 
-### 3. Configure Cursor to use the MCP server
+1. Set up the Python environment:
+   ```bash
+   cd mcp-server
+   python -m venv .venv
+   .venv\Scripts\activate   # Windows
+   # source .venv/bin/activate   # macOS / Linux
+   pip install -r requirements.txt
+   ```
 
-Add the Lightroom MCP server to your Cursor MCP config (e.g. **Settings → MCP** or project `.cursor/mcp.json`):
+2. Add to your Cursor MCP config (e.g. **Settings → MCP** or `.cursor/mcp.json`):
 
-```json
-{
-  "mcpServers": {
-    "lightroom": {
-      "command": "d:/Projects/lightroom-mcp/mcp-server/.venv/Scripts/python.exe",
-      "args": ["d:/Projects/lightroom-mcp/mcp-server/server.py"]
-    }
-  }
-}
-```
-
-Use **absolute paths** to the venv Python and `server.py` (Cursor may ignore `cwd`). Adjust if you cloned the repo elsewhere.
+   ```json
+   {
+     "mcpServers": {
+       "lightroom": {
+         "command": "d:/Projects/lightroom-mcp/mcp-server/.venv/Scripts/python.exe",
+         "args": ["d:/Projects/lightroom-mcp/mcp-server/server.py"]
+       }
+     }
+   }
+   ```
+   **Note:** Use absolute paths to your venv python and `server.py`.
 
 ## Usage
 
-With the plugin loaded in Lightroom and the MCP server configured in Cursor:
+1. Open **Lightroom Classic**.
+2. **Start the MCP Server** (Cursor does this automatically when you open the project or use the tool).
+   - The **Broker** will be started automatically by the MCP server if not running.
+   - You can view the Broker Dashboard at [http://localhost:8085](http://localhost:8085) to see connection status and logs.
+3. Select photos in Lightroom.
+4. Use Cursor to interact with your library!
 
-1. Open a catalog in Lightroom Classic.
-2. Select one or more photos.
-3. In Cursor, use natural language or MCP tools to:
-   - **Get catalog info** — `get_studio_info`
-   - **Inspect selection** — `get_selection` (filenames, paths, rating, label, title, caption, pickFlag, keywords)
-   - **Set rating** — `set_rating(0–5)`
-   - **Set color label** — `set_label("Red"|"Yellow"|"Green"|"Blue"|"Purple"|"None")`
-   - **Set caption** — `set_caption("your text")`
-   - **Set title** — `set_title("your title")`
-   - **Set pick flag** — `set_pick_flag("pick"|"reject"|"none")`
-   - **Manage keywords** — `add_keywords(["keyword1", "Location > Europe"]), remove_keywords(), get_keywords()`
-   - **Collections** — `list_collections(), add_to_collection("collection name")`
-   - **Search photos** — `search_photos("query")`
-   - **Metadata** — `set_metadata(field, value), get_metadata([fields])`
+**Examples:**
+- "Get info about selected photos"
+- "Rate these 5 stars"
+- "Apply 'Vivid' preset"
+- "Create a collection named 'Best of 2024'"
 
-See **[agents.md](./agents.md)** for detailed tool semantics, example workflows, and best practices for AI agents.
+See **[agents.md](./agents.md)** for detailed tool semantics and agent workflows.
 
 ## Project layout
 
 ```
 lightroom-mcp/
 ├── README.md           # This file
-├── agents.md           # MCP tools & agent workflows
-├── SDK_INTEGRATION.md  # Lightroom SDK integration details
-├── CHANGELOG.md        # Version history
-├── CONTRIBUTING.md     # Contribution guidelines
-├── .cursorrules        # Cursor project rules
-├── lightroom_SDK/      # Adobe Lightroom SDK 15.0 (reference)
-├── lightroom-plugin.lrplugin/   # Lua plugin for Lightroom
-│   ├── Info.lua
-│   ├── Init.lua
-│   ├── Shutdown.lua
-│   ├── Server.lua
-│   ├── CommandHandlers.lua
-│   └── JSON.lua
-└── mcp-server/         # Python MCP server
-    ├── server.py
-    ├── lrc_client.py
-    ├── test_connection.py
-    └── requirements.txt
+├── agents.md           # Documentation for AI Agents
+├── SDK_INTEGRATION.md  # Deep dive into LrSDK integration
+├── lightroom-plugin.lrplugin/   # Lua Plugin
+│   ├── Init.lua        # Startup & Server connection
+│   ├── Server.lua      # Socket client implementation
+│   └── ...
+└── mcp-server/         # Python Components
+    ├── server.py       # MCP Server (FastMCP)
+    ├── broker.py       # Relay Broker (Flask)
+    ├── lrc_client.py   # Client for Broker communication
+    └── ...
 ```
-
-## SDK Integration
-
-The plugin is built against **Lightroom SDK 15.0** and follows SDK best practices.
-
-**Download the SDK**: [Adobe Lightroom Classic SDK](https://developer.adobe.com/console/4061681/servicesandapis)
-
-See **[SDK_INTEGRATION.md](./SDK_INTEGRATION.md)** for:
-- SDK version requirements
-- Implementation patterns used
-- Reference examples
-- Testing and debugging
 
 ## Troubleshooting
 
-- **"No response from Lightroom"** — Lightroom must be running, plugin enabled, and nothing else using port **8085**. Restart Lightroom and try again.
-- **MCP server fails to start** — Check Python version, venv, and `pip install -r requirements.txt`. Run from `mcp-server` or set `cwd` correctly in MCP config.
-- **"can't open file 'server.py'" / "No such file or directory"** — Cursor may run the MCP server from your home directory and ignore `cwd`. Use **absolute paths** for both `command` (venv Python) and `args` (path to `server.py`), e.g. `"command": "d:/Projects/lightroom-mcp/mcp-server/.venv/Scripts/python.exe"` and `"args": ["d:/Projects/lightroom-mcp/mcp-server/server.py"]`. Adjust paths if you cloned the repo elsewhere.
-- **Tools fail** — Ensure photos are selected when using `set_rating`, `set_label`, or `set_caption`. Call `get_selection` first to verify.
+- **"Lightroom not connected"**:
+  - Check the Broker Dashboard at `http://localhost:8085`.
+  - Ensure the Lightroom Plugin is **Enabled** (Green light in Plug-in Manager).
+  - Reload the plugin in Plug-in Manager to force a reconnection attempt.
+  - Check `plugin_debug.log` for connection errors.
+
+- **"Broker not running"**:
+  - The MCP server should start it automatically.
+  - You can manually start it: `python mcp-server/start_broker.py`
+
+- **Port Conflicts**:
+  - Broker uses port **8085** (HTTP) and **8086** (Socket). Ensure these are free.
 
 ## License
 

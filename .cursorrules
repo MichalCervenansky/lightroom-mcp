@@ -31,3 +31,4 @@
 
 - **agents.md** — MCP tools, parameters, return values, and agent workflows.
 - **README.md** — Setup, usage, troubleshooting.
+- **skills/memory/SKILL.md** — Memory MCP tools and usage.

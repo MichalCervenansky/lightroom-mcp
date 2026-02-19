@@ -543,7 +543,7 @@ function CommandHandlers.get_keywords( params )
         local allKeywords = {}
         for _, photo in ipairs( targetPhotos ) do
             if photo then
-                local photoKeywords = photo:getKeywords()
+                local photoKeywords = photo:getRawMetadata('keywords') or {}
                 for _, keyword in ipairs( photoKeywords ) do
                     local path = getKeywordPath( keyword )
                     -- Avoid duplicates
@@ -1161,7 +1161,7 @@ function CommandHandlers.get_all_metadata( params )
         -- Helper to get keyword paths
         local function getKeywordPaths( photo )
             local success, keywords = LrTasks.pcall( function()
-                return photo:getKeywords()
+                return photo:getRawMetadata('keywords')
             end )
             if not success or not keywords then
                 return {}

@@ -1,3 +1,4 @@
+
 lightroom_SDK/
 __pycache__/
 *.pyc
@@ -14,3 +15,17 @@ pip-delete-this-directory.txt
 mcp_bridge_port.txt
 debug_report.txt
 mcp-server/broker_history.json
+
+# PyInstaller
+mcp-server/build/
+mcp-server/dist/
+*.spec
+
+# Test/Debug Artifacts
+mcp-server/.pytest_cache/
+preview_test.jpg
+*_test.jpg
+
+# System
+.DS_Store
+Thumbs.db
