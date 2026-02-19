@@ -1,5 +1,3 @@
-from mcp.server.fastmcp import FastMCP
-from lrc_client import LrCClient
 import base64
 import io
 import json
@@ -9,6 +7,23 @@ import re
 import hashlib
 import fnmatch
 from datetime import datetime
+from typing import Optional, Any
+from contextlib import asynccontextmanager
+from dataclasses import dataclass
+
+from mcp.server.fastmcp import FastMCP, Context
+from mcp.server.session import ServerSession
+from mcp.shared.exceptions import McpError
+from mcp.types import INVALID_PARAMS, INTERNAL_ERROR, INVALID_REQUEST, METHOD_NOT_FOUND, PARSE_ERROR
+
+class ErrorCode:
+    PARSE_ERROR = PARSE_ERROR
+    INVALID_REQUEST = INVALID_REQUEST
+    METHOD_NOT_FOUND = METHOD_NOT_FOUND
+    INVALID_PARAMS = INVALID_PARAMS
+    INTERNAL_ERROR = INTERNAL_ERROR
+
+from lrc_client import LrCClient
 
 # Try to import Pillow for image metadata reading
 try:
@@ -35,48 +50,71 @@ RAW_EXTENSIONS = {
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Initialize MCP Server
-mcp = FastMCP("Lightroom MCP")
+@dataclass
+class AppContext:
+    lrc: LrCClient
 
-# Initialize LrC Client
-lrc = LrCClient()
+@asynccontextmanager
+async def app_lifespan(server: FastMCP):
+    """Manage Lightroom client lifecycle."""
+    lrc = LrCClient()
+    try:
+        # Check connection on startup
+        status = lrc._ensure_broker_running()
+        logger.info(f"Lightroom broker status: {'OK' if status else 'Not running'}")
+        yield AppContext(lrc=lrc)
+    finally:
+        lrc.close()
 
-@mcp.tool()
-def get_studio_info() -> str:
+# Initialize MCP Server with metadata
+mcp = FastMCP(
+    "Lightroom MCP",
+    instructions="Use this server to control Adobe Lightroom Classic: manage photos, metadata, develop settings, presets, and collections.",
+    lifespan=app_lifespan
+)
+
+@mcp.tool(annotations={"readOnly": True})
+async def get_studio_info(ctx: Context[ServerSession, AppContext]) -> Any:
     """
     Get information about the active Lightroom Catalog.
-    Returns JSON string with catalog name, path, and plugin version.
+    Returns dictionary with catalog name, path, and plugin version.
     """
+    lrc = ctx.request_context.lifespan_context.lrc
     try:
         result = lrc.send_command("get_studio_info")
         if result and "result" in result:
-            return str(result["result"])
+            return result["result"]
         elif result and "error" in result:
-            return f"Error: {result['error']['message']}"
+            raise McpError(ErrorCode.INTERNAL_ERROR, f"Lightroom error: {result['error']['message']}")
         else:
-            return "Error: No response from Lightroom"
+            raise McpError(ErrorCode.INTERNAL_ERROR, "No response from Lightroom")
+    except McpError:
+        raise
     except Exception as e:
-        return f"Error: {str(e)}"
+        raise McpError(ErrorCode.INTERNAL_ERROR, f"Error: {str(e)}")
 
-@mcp.tool()
-def get_selection() -> str:
+@mcp.tool(annotations={"readOnly": True})
+async def get_selection(ctx: Context[ServerSession, AppContext]) -> Any:
     """
     Get the list of currently selected photos in Lightroom.
-    Returns JSON string with photo details (filename, rating, label, etc.).
+    Returns list with photo details (filename, rating, label, etc.).
     """
+    lrc = ctx.request_context.lifespan_context.lrc
     try:
         result = lrc.send_command("get_selection")
         if result and "result" in result:
-            return str(result["result"])
+            return result["result"]
         elif result and "error" in result:
-            return f"Error: {result['error']['message']}"
+            raise McpError(ErrorCode.INTERNAL_ERROR, f"Lightroom error: {result['error']['message']}")
         else:
-            return "Error: No response from Lightroom"
+            raise McpError(ErrorCode.INTERNAL_ERROR, "No response from Lightroom")
+    except McpError:
+        raise
     except Exception as e:
-        return f"Error: {str(e)}"
+        raise McpError(ErrorCode.INTERNAL_ERROR, f"Error: {str(e)}")
 
-@mcp.tool()
-def set_rating(rating: int) -> str:
+@mcp.tool(annotations={"destructive": True})
+async def set_rating(rating: int, ctx: Context[ServerSession, AppContext]) -> str:
     """
     Set the star rating for the currently selected photos.
 
@@ -84,21 +122,24 @@ def set_rating(rating: int) -> str:
         rating: Integer between 0 and 5.
     """
     if not (0 <= rating <= 5):
-        return "Error: Rating must be between 0 and 5"
+        raise McpError(ErrorCode.INVALID_PARAMS, "Rating must be between 0 and 5")
 
+    lrc = ctx.request_context.lifespan_context.lrc
     try:
         result = lrc.send_command("set_rating", {"rating": rating})
         if result and "result" in result:
             return "Success"
         elif result and "error" in result:
-            return f"Error: {result['error']['message']}"
+            raise McpError(ErrorCode.INTERNAL_ERROR, f"Lightroom error: {result['error']['message']}")
         else:
-            return "Error: No response from Lightroom"
+            raise McpError(ErrorCode.INTERNAL_ERROR, "No response from Lightroom")
+    except McpError:
+        raise
     except Exception as e:
-        return f"Error: {str(e)}"
+        raise McpError(ErrorCode.INTERNAL_ERROR, f"Error: {str(e)}")
 
-@mcp.tool()
-def set_label(label: str) -> str:
+@mcp.tool(annotations={"destructive": True})
+async def set_label(label: str, ctx: Context[ServerSession, AppContext]) -> str:
     """
     Set the color label for the currently selected photos.
 
@@ -107,56 +148,65 @@ def set_label(label: str) -> str:
     """
     valid_labels = ['Red', 'Yellow', 'Green', 'Blue', 'Purple', 'None']
     if label not in valid_labels:
-        return f"Error: Label must be one of {valid_labels}"
+        raise McpError(ErrorCode.INVALID_PARAMS, f"Label must be one of {valid_labels}")
 
+    lrc = ctx.request_context.lifespan_context.lrc
     try:
         result = lrc.send_command("set_label", {"label": label})
         if result and "result" in result:
             return "Success"
         elif result and "error" in result:
-            return f"Error: {result['error']['message']}"
+            raise McpError(ErrorCode.INTERNAL_ERROR, f"Lightroom error: {result['error']['message']}")
         else:
-            return "Error: No response from Lightroom"
+            raise McpError(ErrorCode.INTERNAL_ERROR, "No response from Lightroom")
+    except McpError:
+        raise
     except Exception as e:
-        return f"Error: {str(e)}"
+        raise McpError(ErrorCode.INTERNAL_ERROR, f"Error: {str(e)}")
 
-@mcp.tool()
-def set_caption(caption: str) -> str:
+@mcp.tool(annotations={"destructive": True})
+async def set_caption(caption: str, ctx: Context[ServerSession, AppContext]) -> str:
     """
     Set the caption for the currently selected photos.
     """
+    lrc = ctx.request_context.lifespan_context.lrc
     try:
         result = lrc.send_command("set_caption", {"caption": caption})
         if result and "result" in result:
             return "Success"
         elif result and "error" in result:
-            return f"Error: {result['error']['message']}"
+            raise McpError(ErrorCode.INTERNAL_ERROR, f"Lightroom error: {result['error']['message']}")
         else:
-            return "Error: No response from Lightroom"
+            raise McpError(ErrorCode.INTERNAL_ERROR, "No response from Lightroom")
+    except McpError:
+        raise
     except Exception as e:
-        return f"Error: {str(e)}"
+        raise McpError(ErrorCode.INTERNAL_ERROR, f"Error: {str(e)}")
 
-@mcp.tool()
-def set_title(title: str) -> str:
+@mcp.tool(annotations={"destructive": True})
+async def set_title(title: str, ctx: Context[ServerSession, AppContext]) -> str:
     """
     Set the title for the currently selected photos.
 
     Args:
         title: Title text to apply.
     """
+    lrc = ctx.request_context.lifespan_context.lrc
     try:
         result = lrc.send_command("set_title", {"title": title})
         if result and "result" in result:
             return "Success"
         elif result and "error" in result:
-            return f"Error: {result['error']['message']}"
+            raise McpError(ErrorCode.INTERNAL_ERROR, f"Lightroom error: {result['error']['message']}")
         else:
-            return "Error: No response from Lightroom"
+            raise McpError(ErrorCode.INTERNAL_ERROR, "No response from Lightroom")
+    except McpError:
+        raise
     except Exception as e:
-        return f"Error: {str(e)}"
+        raise McpError(ErrorCode.INTERNAL_ERROR, f"Error: {str(e)}")
 
-@mcp.tool()
-def set_pick_flag(pick_flag: str) -> str:
+@mcp.tool(annotations={"destructive": True})
+async def set_pick_flag(pick_flag: str, ctx: Context[ServerSession, AppContext]) -> str:
     """
     Set the pick flag (pick/reject) for the currently selected photos.
 
@@ -165,21 +215,24 @@ def set_pick_flag(pick_flag: str) -> str:
     """
     valid_flags = ['pick', 'reject', 'none']
     if pick_flag.lower() not in valid_flags:
-        return f"Error: pick_flag must be one of {valid_flags}"
+        raise McpError(ErrorCode.INVALID_PARAMS, f"pick_flag must be one of {valid_flags}")
 
+    lrc = ctx.request_context.lifespan_context.lrc
     try:
         result = lrc.send_command("set_pick_flag", {"pickFlag": pick_flag})
         if result and "result" in result:
             return "Success"
         elif result and "error" in result:
-            return f"Error: {result['error']['message']}"
+            raise McpError(ErrorCode.INTERNAL_ERROR, f"Lightroom error: {result['error']['message']}")
         else:
-            return "Error: No response from Lightroom"
+            raise McpError(ErrorCode.INTERNAL_ERROR, "No response from Lightroom")
+    except McpError:
+        raise
     except Exception as e:
-        return f"Error: {str(e)}"
+        raise McpError(ErrorCode.INTERNAL_ERROR, f"Error: {str(e)}")
 
-@mcp.tool()
-def add_keywords(keywords: list[str]) -> str:
+@mcp.tool(annotations={"destructive": True})
+async def add_keywords(keywords: list[str], ctx: Context[ServerSession, AppContext]) -> str:
     """
     Add keywords to the currently selected photos.
 
@@ -187,21 +240,24 @@ def add_keywords(keywords: list[str]) -> str:
         keywords: Array of keyword strings. Supports hierarchical keywords using ' > ' separator (e.g., "Location > Europe > France").
     """
     if not isinstance(keywords, list):
-        return "Error: keywords must be an array"
+        raise McpError(ErrorCode.INVALID_PARAMS, "keywords must be an array")
 
+    lrc = ctx.request_context.lifespan_context.lrc
     try:
         result = lrc.send_command("add_keywords", {"keywords": keywords})
         if result and "result" in result:
             return "Success"
         elif result and "error" in result:
-            return f"Error: {result['error']['message']}"
+            raise McpError(ErrorCode.INTERNAL_ERROR, f"Lightroom error: {result['error']['message']}")
         else:
-            return "Error: No response from Lightroom"
+            raise McpError(ErrorCode.INTERNAL_ERROR, "No response from Lightroom")
+    except McpError:
+        raise
     except Exception as e:
-        return f"Error: {str(e)}"
+        raise McpError(ErrorCode.INTERNAL_ERROR, f"Error: {str(e)}")
 
-@mcp.tool()
-def remove_keywords(keywords: list[str]) -> str:
+@mcp.tool(annotations={"destructive": True})
+async def remove_keywords(keywords: list[str], ctx: Context[ServerSession, AppContext]) -> str:
     """
     Remove keywords from the currently selected photos.
 
@@ -209,94 +265,109 @@ def remove_keywords(keywords: list[str]) -> str:
         keywords: Array of keyword strings to remove. Supports hierarchical keywords using ' > ' separator.
     """
     if not isinstance(keywords, list):
-        return "Error: keywords must be an array"
+        raise McpError(ErrorCode.INVALID_PARAMS, "keywords must be an array")
 
+    lrc = ctx.request_context.lifespan_context.lrc
     try:
         result = lrc.send_command("remove_keywords", {"keywords": keywords})
         if result and "result" in result:
             return "Success"
         elif result and "error" in result:
-            return f"Error: {result['error']['message']}"
+            raise McpError(ErrorCode.INTERNAL_ERROR, f"Lightroom error: {result['error']['message']}")
         else:
-            return "Error: No response from Lightroom"
+            raise McpError(ErrorCode.INTERNAL_ERROR, "No response from Lightroom")
+    except McpError:
+        raise
     except Exception as e:
-        return f"Error: {str(e)}"
+        raise McpError(ErrorCode.INTERNAL_ERROR, f"Error: {str(e)}")
 
-@mcp.tool()
-def get_keywords() -> str:
+@mcp.tool(annotations={"readOnly": True})
+async def get_keywords(ctx: Context[ServerSession, AppContext]) -> Any:
     """
     Get all keywords from the currently selected photos.
-    Returns JSON string with array of keyword paths.
+    Returns list of keyword paths.
     """
+    lrc = ctx.request_context.lifespan_context.lrc
     try:
         result = lrc.send_command("get_keywords")
         if result and "result" in result:
-            return str(result["result"])
+            return result["result"]
         elif result and "error" in result:
-            return f"Error: {result['error']['message']}"
+            raise McpError(ErrorCode.INTERNAL_ERROR, f"Lightroom error: {result['error']['message']}")
         else:
-            return "Error: No response from Lightroom"
+            raise McpError(ErrorCode.INTERNAL_ERROR, "No response from Lightroom")
+    except McpError:
+        raise
     except Exception as e:
-        return f"Error: {str(e)}"
+        raise McpError(ErrorCode.INTERNAL_ERROR, f"Error: {str(e)}")
 
-@mcp.tool()
-def list_collections() -> str:
+@mcp.tool(annotations={"readOnly": True})
+async def list_collections(ctx: Context[ServerSession, AppContext]) -> Any:
     """
     List all collections in the active catalog.
-    Returns JSON string with array of collections (name, id, type).
+    Returns list of collections (name, id, type).
     """
+    lrc = ctx.request_context.lifespan_context.lrc
     try:
         result = lrc.send_command("list_collections")
         if result and "result" in result:
-            return str(result["result"])
+            return result["result"]
         elif result and "error" in result:
-            return f"Error: {result['error']['message']}"
+            raise McpError(ErrorCode.INTERNAL_ERROR, f"Lightroom error: {result['error']['message']}")
         else:
-            return "Error: No response from Lightroom"
+            raise McpError(ErrorCode.INTERNAL_ERROR, "No response from Lightroom")
+    except McpError:
+        raise
     except Exception as e:
-        return f"Error: {str(e)}"
+        raise McpError(ErrorCode.INTERNAL_ERROR, f"Error: {str(e)}")
 
-@mcp.tool()
-def add_to_collection(collection_name: str) -> str:
+@mcp.tool(annotations={"destructive": True})
+async def add_to_collection(collection_name: str, ctx: Context[ServerSession, AppContext]) -> str:
     """
     Add the currently selected photos to a collection. Creates the collection if it doesn't exist.
 
     Args:
         collection_name: Name of the collection to add photos to.
     """
+    lrc = ctx.request_context.lifespan_context.lrc
     try:
         result = lrc.send_command("add_to_collection", {"collectionName": collection_name})
         if result and "result" in result:
             return "Success"
         elif result and "error" in result:
-            return f"Error: {result['error']['message']}"
+            raise McpError(ErrorCode.INTERNAL_ERROR, f"Lightroom error: {result['error']['message']}")
         else:
-            return "Error: No response from Lightroom"
+            raise McpError(ErrorCode.INTERNAL_ERROR, "No response from Lightroom")
+    except McpError:
+        raise
     except Exception as e:
-        return f"Error: {str(e)}"
+        raise McpError(ErrorCode.INTERNAL_ERROR, f"Error: {str(e)}")
 
-@mcp.tool()
-def search_photos(query: str) -> str:
+@mcp.tool(annotations={"readOnly": True})
+async def search_photos(query: str, ctx: Context[ServerSession, AppContext]) -> Any:
     """
     Search for photos in the catalog by filename, title, or caption.
 
     Args:
         query: Search query string.
-    Returns JSON string with array of matching photos.
+    Returns list of matching photos.
     """
+    lrc = ctx.request_context.lifespan_context.lrc
     try:
         result = lrc.send_command("search_photos", {"query": query})
         if result and "result" in result:
-            return str(result["result"])
+            return result["result"]
         elif result and "error" in result:
-            return f"Error: {result['error']['message']}"
+            raise McpError(ErrorCode.INTERNAL_ERROR, f"Lightroom error: {result['error']['message']}")
         else:
-            return "Error: No response from Lightroom"
+            raise McpError(ErrorCode.INTERNAL_ERROR, "No response from Lightroom")
+    except McpError:
+        raise
     except Exception as e:
-        return f"Error: {str(e)}"
+        raise McpError(ErrorCode.INTERNAL_ERROR, f"Error: {str(e)}")
 
-@mcp.tool()
-def set_metadata(field: str, value: str) -> str:
+@mcp.tool(annotations={"destructive": True})
+async def set_metadata(field: str, value: str, ctx: Context[ServerSession, AppContext]) -> str:
     """
     Set a metadata field for the currently selected photos.
 
@@ -304,99 +375,45 @@ def set_metadata(field: str, value: str) -> str:
         field: Metadata field name (e.g., 'dateCreated', 'copyright', 'gps', 'gpsAltitude').
         value: Value to set. For dates, use ISO format strings. For GPS, use appropriate format.
     """
+    lrc = ctx.request_context.lifespan_context.lrc
     try:
         result = lrc.send_command("set_metadata", {"field": field, "value": value})
         if result and "result" in result:
             return "Success"
         elif result and "error" in result:
-            return f"Error: {result['error']['message']}"
+            raise McpError(ErrorCode.INTERNAL_ERROR, f"Lightroom error: {result['error']['message']}")
         else:
-            return "Error: No response from Lightroom"
+            raise McpError(ErrorCode.INTERNAL_ERROR, "No response from Lightroom")
+    except McpError:
+        raise
     except Exception as e:
-        return f"Error: {str(e)}"
+        raise McpError(ErrorCode.INTERNAL_ERROR, f"Error: {str(e)}")
 
-@mcp.tool()
-def get_metadata(fields: list[str]) -> str:
+@mcp.tool(annotations={"readOnly": True})
+async def get_metadata(fields: list[str], ctx: Context[ServerSession, AppContext]) -> Any:
     """
     Get metadata fields from the currently selected photos.
 
     Args:
         fields: Array of metadata field names to retrieve (e.g., ['dateCreated', 'copyright', 'gps']).
-    Returns JSON string with array of photo metadata objects.
+    Returns list of photo metadata objects.
     """
     if not isinstance(fields, list):
-        return "Error: fields must be an array"
+        raise McpError(ErrorCode.INVALID_PARAMS, "fields must be an array")
 
+    lrc = ctx.request_context.lifespan_context.lrc
     try:
         result = lrc.send_command("get_metadata", {"fields": fields})
         if result and "result" in result:
-            return str(result["result"])
+            return result["result"]
         elif result and "error" in result:
-            return f"Error: {result['error']['message']}"
+            raise McpError(ErrorCode.INTERNAL_ERROR, f"Lightroom error: {result['error']['message']}")
         else:
-            return "Error: No response from Lightroom"
+            raise McpError(ErrorCode.INTERNAL_ERROR, "No response from Lightroom")
+    except McpError:
+        raise
     except Exception as e:
-        return f"Error: {str(e)}"
-
-@mcp.tool()
-def get_develop_settings() -> str:
-    """
-    Get develop/Camera Raw settings for the currently selected photos.
-    Returns JSON string with array of photo objects containing develop settings.
-    Each photo includes localId, filename, and a settings dictionary with all develop parameters.
-    """
-    try:
-        result = lrc.send_command("get_develop_settings")
-        if result and "result" in result:
-            return str(result["result"])
-        elif result and "error" in result:
-            return f"Error: {result['error']['message']}"
-        else:
-            return "Error: No response from Lightroom"
-    except Exception as e:
-        return f"Error: {str(e)}"
-
-@mcp.tool()
-def set_develop_settings(settings: dict) -> str:
-    """
-    Set develop/Camera Raw settings for the currently selected photos.
-
-    Args:
-        settings: Dictionary of parameter names to values. Examples:
-            - Basic/Light: {"Exposure": 1.0, "Contrast": 25, "Temperature": 5500, "Tint": 10, "Highlights": -20, "Shadows": 30, "Whites": 5, "Blacks": -10, "Clarity": 15, "Vibrance": 10, "Saturation": 5}
-            - Tone Curve: {"ParametricDarks": -10, "ParametricLights": 15, "ParametricShadows": -5, "ParametricHighlights": 10}
-            - HSL/Color: {"SaturationAdjustmentBlue": -20, "HueAdjustmentOrange": 10, "LuminanceAdjustmentRed": 15}
-            - Split Toning: {"SplitToningShadowHue": 200, "SplitToningShadowSaturation": 25, "SplitToningHighlightHue": 50, "SplitToningHighlightSaturation": 15, "SplitToningBalance": 0}
-            - Detail: {"Sharpness": 40, "SharpenRadius": 1.0, "SharpenDetail": 25, "SharpenEdgeMasking": 60, "LuminanceSmoothing": 0, "ColorNoiseReduction": 25}
-            - Effects: {"Dehaze": 10, "PostCropVignetteAmount": -30, "GrainAmount": 25}
-            - Lens Corrections: {"LensProfileDistortionScale": 100, "DefringePurpleAmount": 5}
-            - Calibration: {"ShadowTint": 0, "RedHue": 0, "RedSaturation": 0}
-
-    Returns "Success" or error message.
-    """
-    if not isinstance(settings, dict):
-        return "Error: settings must be a dictionary"
-
-    try:
-        result = lrc.send_command("set_develop_settings", {"settings": settings})
-        if result and "result" in result:
-            return "Success"
-        elif result and "error" in result:
-            return f"Error: {result['error']['message']}"
-        else:
-            return "Error: No response from Lightroom"
-    except Exception as e:
-        return f"Error: {str(e)}"
-
-
-def _sanitize_filename(name: str) -> str:
-    """Remove path components and invalid chars for use as a file name."""
-    base = os.path.basename(name) if name else "preview"
-    base = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", base)
-    base = base.strip() or "preview"
-    root, ext = os.path.splitext(base)
-    return (root or "preview") + ".jpg"
-
+        raise McpError(ErrorCode.INTERNAL_ERROR, f"Error: {str(e)}")
 
 
 def _find_file(filename: str, search_root: str) -> str | None:
@@ -412,6 +429,10 @@ def _find_file(filename: str, search_root: str) -> str | None:
                 return os.path.join(root, name)
 
     return None
+def sanitize_filename(filename: str) -> str:
+    """Sanitize filename to be safe for filesystem."""
+    # Remove any characters that aren't alphanumeric, space, dot, underscore, or hyphen
+    return re.sub(r'[^\w\s\.-]', '', filename).strip()
 
 def _generate_preview_from_path(file_path: str, max_width: int = 800, max_height: int = 800) -> tuple[bytes, str]:
     """
@@ -489,152 +510,110 @@ def _generate_preview_from_path(file_path: str, max_width: int = 800, max_height
         return None, f"Preview generation failed: {str(e)}"
 
 
-@mcp.tool()
-def get_exif_data() -> str:
+@mcp.tool(annotations={"readOnly": True})
+async def get_exif_data(ctx: Context[ServerSession, AppContext]) -> Any:
     """
     Get EXIF metadata from the currently selected photos.
     Returns camera, lens, exposure, and capture settings.
-
-    Returns JSON with array of photo objects containing:
-        - localId, filename
-        - camera: make, model, serialNumber
-        - lens: name, focalLength, focalLength35mm
-        - exposure: aperture, shutterSpeed, iso, exposureBias, exposureProgram, meteringMode
-        - flash: fired, mode
-        - dateTimeOriginal, dateTimeDigitized
-        - gps: latitude, longitude, altitude, direction
-        - dimensions: width, height, orientation
     """
+    lrc = ctx.request_context.lifespan_context.lrc
     try:
         result = lrc.send_command("get_exif_data")
         if result and "result" in result:
-            return str(result["result"])
+            return result["result"]
         elif result and "error" in result:
-            return f"Error: {result['error']['message']}"
+            raise McpError(ErrorCode.INTERNAL_ERROR, f"Lightroom error: {result['error']['message']}")
         else:
-            return "Error: No response from Lightroom"
+            raise McpError(ErrorCode.INTERNAL_ERROR, "No response from Lightroom")
+    except McpError:
+        raise
     except Exception as e:
-        return f"Error: {str(e)}"
+        raise McpError(ErrorCode.INTERNAL_ERROR, f"Error: {str(e)}")
 
-@mcp.tool()
-def get_iptc_data() -> str:
+@mcp.tool(annotations={"readOnly": True})
+async def get_iptc_data(ctx: Context[ServerSession, AppContext]) -> Any:
     """
     Get IPTC metadata from the currently selected photos.
     Returns creator, copyright, and location information.
-
-    Returns JSON with array of photo objects containing:
-        - localId, filename
-        - creator: artist, credit, source, byline, bylineTitle
-        - copyright: notice, status, url
-        - content: headline, caption, title, instructions, scene, subjectCode
-        - location: city, stateProvince, country, countryCode, location, sublocation
-        - workflow: jobIdentifier, provider, rightsUsageTerms
-        - contact: address, city, region, postalCode, country, phone, email, website
     """
+    lrc = ctx.request_context.lifespan_context.lrc
     try:
         result = lrc.send_command("get_iptc_data")
         if result and "result" in result:
-            return str(result["result"])
+            return result["result"]
         elif result and "error" in result:
-            return f"Error: {result['error']['message']}"
+            raise McpError(ErrorCode.INTERNAL_ERROR, f"Lightroom error: {result['error']['message']}")
         else:
-            return "Error: No response from Lightroom"
+            raise McpError(ErrorCode.INTERNAL_ERROR, "No response from Lightroom")
+    except McpError:
+        raise
     except Exception as e:
-        return f"Error: {str(e)}"
+        raise McpError(ErrorCode.INTERNAL_ERROR, f"Error: {str(e)}")
 
-@mcp.tool()
-def set_iptc_data(data: dict) -> str:
+@mcp.tool(annotations={"destructive": True})
+async def set_iptc_data(data: dict, ctx: Context[ServerSession, AppContext]) -> str:
     """
     Set IPTC metadata for the currently selected photos.
-
-    Args:
-        data: Dictionary with IPTC fields to set. Supported fields:
-            - creator: Artist name/creator
-            - copyright: Copyright notice text
-            - copyrightState: 'copyrighted', 'public domain', or 'unknown'
-            - copyrightInfoUrl: URL for copyright info
-            - headline: Brief synopsis/headline
-            - caption: Description/caption text
-            - title: Title of the work
-            - instructions: Special instructions
-            - jobIdentifier: Job/assignment ID
-            - city: City name
-            - stateProvince: State/Province name
-            - country: Country name
-            - isoCountryCode: ISO country code (e.g., 'US', 'UK')
-            - location: Specific location/sublocation
-
-    Example: {"creator": "John Doe", "copyright": "© 2024 John Doe", "city": "New York"}
-
-    Returns "Success" or error message.
     """
     if not isinstance(data, dict):
-        return "Error: data must be a dictionary"
+        raise McpError(ErrorCode.INVALID_PARAMS, "data must be a dictionary")
 
+    lrc = ctx.request_context.lifespan_context.lrc
     try:
         result = lrc.send_command("set_iptc_data", {"data": data})
         if result and "result" in result:
             return "Success"
         elif result and "error" in result:
-            return f"Error: {result['error']['message']}"
+            raise McpError(ErrorCode.INTERNAL_ERROR, f"Lightroom error: {result['error']['message']}")
         else:
-            return "Error: No response from Lightroom"
+            raise McpError(ErrorCode.INTERNAL_ERROR, "No response from Lightroom")
+    except McpError:
+        raise
     except Exception as e:
-        return f"Error: {str(e)}"
+        raise McpError(ErrorCode.INTERNAL_ERROR, f"Error: {str(e)}")
 
-@mcp.tool()
-def get_xmp_data() -> str:
+@mcp.tool(annotations={"readOnly": True})
+async def get_xmp_data(ctx: Context[ServerSession, AppContext]) -> Any:
     """
     Get XMP/Adobe-specific metadata from the currently selected photos.
     Returns processing history, edit information, and Adobe-specific fields.
-
-    Returns JSON with array of photo objects containing:
-        - localId, filename
-        - fileInfo: fileFormat, fileType, originalFilename, sidecarPath
-        - dimensions: croppedWidth, croppedHeight, aspectRatio
-        - editing: editCount, lastEditTime, developPresetName
-        - processing: processVersion, cameraProfile, whiteBalance
-        - catalogInfo: dateAdded, virtualCopy, masterPhoto, stackPosition, stackInFolderIsCollapsed
-        - colorLabel: colorNameForLabel, label
-        - smartPreview: hasSmartPreview, smartPreviewStatus
     """
+    lrc = ctx.request_context.lifespan_context.lrc
     try:
         result = lrc.send_command("get_xmp_data")
         if result and "result" in result:
-            return str(result["result"])
+            return result["result"]
         elif result and "error" in result:
-            return f"Error: {result['error']['message']}"
+            raise McpError(ErrorCode.INTERNAL_ERROR, f"Lightroom error: {result['error']['message']}")
         else:
-            return "Error: No response from Lightroom"
+            raise McpError(ErrorCode.INTERNAL_ERROR, "No response from Lightroom")
+    except McpError:
+        raise
     except Exception as e:
-        return f"Error: {str(e)}"
+        raise McpError(ErrorCode.INTERNAL_ERROR, f"Error: {str(e)}")
 
-@mcp.tool()
-def get_all_metadata() -> str:
+@mcp.tool(annotations={"readOnly": True})
+async def get_all_metadata(ctx: Context[ServerSession, AppContext]) -> Any:
     """
     Get comprehensive metadata from the currently selected photos.
     Combines EXIF, IPTC, XMP, and Lightroom-specific metadata in one call.
-
-    Returns JSON with array of photo objects containing all available metadata:
-        - Basic info: localId, filename, path, uuid
-        - EXIF: camera, lens, exposure settings, GPS, dimensions
-        - IPTC: creator, copyright, location, content
-        - XMP: processing info, edit history, catalog info
-        - Lightroom: rating, label, pickStatus, keywords, collections
     """
+    lrc = ctx.request_context.lifespan_context.lrc
     try:
         result = lrc.send_command("get_all_metadata")
         if result and "result" in result:
-            return str(result["result"])
+            return result["result"]
         elif result and "error" in result:
-            return f"Error: {result['error']['message']}"
+            raise McpError(ErrorCode.INTERNAL_ERROR, f"Lightroom error: {result['error']['message']}")
         else:
-            return "Error: No response from Lightroom"
+            raise McpError(ErrorCode.INTERNAL_ERROR, "No response from Lightroom")
+    except McpError:
+        raise
     except Exception as e:
-        return f"Error: {str(e)}"
+        raise McpError(ErrorCode.INTERNAL_ERROR, f"Error: {str(e)}")
 
-@mcp.tool()
-def set_gps_data(latitude: float, longitude: float, altitude: float = None) -> str:
+@mcp.tool(annotations={"destructive": True})
+async def set_gps_data(latitude: float, longitude: float, altitude: Optional[float] = None, ctx: Context[ServerSession, AppContext] = None) -> str:
     """
     Set GPS coordinates for the currently selected photos.
 
@@ -642,46 +621,48 @@ def set_gps_data(latitude: float, longitude: float, altitude: float = None) -> s
         latitude: GPS latitude in decimal degrees (-90 to 90)
         longitude: GPS longitude in decimal degrees (-180 to 180)
         altitude: Optional GPS altitude in meters
-
-    Returns "Success" or error message.
     """
     if not (-90 <= latitude <= 90):
-        return "Error: Latitude must be between -90 and 90"
+        raise McpError(ErrorCode.INVALID_PARAMS, "Latitude must be between -90 and 90")
     if not (-180 <= longitude <= 180):
-        return "Error: Longitude must be between -180 and 180"
+        raise McpError(ErrorCode.INVALID_PARAMS, "Longitude must be between -180 and 180")
 
-    params = {"latitude": latitude, "longitude": longitude}
-    if altitude is not None:
-        params["altitude"] = altitude
-
+    lrc = ctx.request_context.lifespan_context.lrc
     try:
+        params = {"latitude": latitude, "longitude": longitude}
+        if altitude is not None:
+            params["altitude"] = altitude
+
         result = lrc.send_command("set_gps_data", params)
         if result and "result" in result:
             return "Success"
         elif result and "error" in result:
-            return f"Error: {result['error']['message']}"
+            raise McpError(ErrorCode.INTERNAL_ERROR, f"Lightroom error: {result['error']['message']}")
         else:
-            return "Error: No response from Lightroom"
+            raise McpError(ErrorCode.INTERNAL_ERROR, "No response from Lightroom")
+    except McpError:
+        raise
     except Exception as e:
-        return f"Error: {str(e)}"
+        raise McpError(ErrorCode.INTERNAL_ERROR, f"Error: {str(e)}")
 
-@mcp.tool()
-def clear_gps_data() -> str:
+@mcp.tool(annotations={"destructive": True})
+async def clear_gps_data(ctx: Context[ServerSession, AppContext]) -> str:
     """
     Clear/remove GPS coordinates from the currently selected photos.
-
-    Returns "Success" or error message.
     """
+    lrc = ctx.request_context.lifespan_context.lrc
     try:
         result = lrc.send_command("clear_gps_data")
         if result and "result" in result:
             return "Success"
         elif result and "error" in result:
-            return f"Error: {result['error']['message']}"
+            raise McpError(ErrorCode.INTERNAL_ERROR, f"Lightroom error: {result['error']['message']}")
         else:
-            return "Error: No response from Lightroom"
+            raise McpError(ErrorCode.INTERNAL_ERROR, "No response from Lightroom")
+    except McpError:
+        raise
     except Exception as e:
-        return f"Error: {str(e)}"
+        raise McpError(ErrorCode.INTERNAL_ERROR, f"Error: {str(e)}")
 
 def _extract_exif_value(value):
     """Helper to convert EXIF values to JSON-serializable format."""
@@ -718,8 +699,8 @@ def _convert_gps_to_decimal(gps_coords, gps_ref):
 
 
 
-@mcp.tool()
-def get_metadata_by_filename(filename: str, search_root: str = ".") -> str:
+@mcp.tool(annotations={"readOnly": True})
+async def get_metadata_by_filename(filename: str, ctx: Context[ServerSession, AppContext], search_root: str = ".") -> Any:
     """
     Get metadata for a photo by its filename.
 
@@ -735,25 +716,16 @@ def get_metadata_by_filename(filename: str, search_root: str = ".") -> str:
     """
     # 1. Check if it's an absolute path that exists
     if os.path.isabs(filename) and os.path.isfile(filename):
-        return read_file_metadata(filename)
+        return await read_file_metadata(filename, ctx)
 
     base_name = os.path.basename(filename)
 
     # 2. Try LrC Search first
-    lrc_result_str = search_photos(base_name)
     try:
-        # Check if we got a valid JSON list response
-        # search_photos returns a JSON string, so we need to parse it to check if it's empty
-        if not lrc_result_str.startswith("Error"):
-            try:
-                data = json.loads(lrc_result_str)
-                # If we got results and at least one matches our filename reasonably well
-                if isinstance(data, list) and len(data) > 0:
-                    # Return the LrC metadata for the first match
-                    # We might want to be stricter here, but for now this is good
-                    return lrc_result_str
-            except json.JSONDecodeError:
-                pass
+        lrc_result = await search_photos(base_name, ctx)
+        # If we got results and at least one matches our filename reasonably well
+        if isinstance(lrc_result, list) and len(lrc_result) > 0:
+            return lrc_result
     except Exception as e:
         logger.warning(f"LrC search failed: {e}")
 
@@ -763,13 +735,13 @@ def get_metadata_by_filename(filename: str, search_root: str = ".") -> str:
 
     if found_path:
         logger.info(f"Found file at {found_path}")
-        return read_file_metadata(found_path)
+        return await read_file_metadata(found_path, ctx)
 
-    return f"Error: File '{filename}' not found in Lightroom catalog or in {os.path.abspath(search_root)}"
+    raise McpError(ErrorCode.INTERNAL_ERROR, f"File '{filename}' not found in Lightroom catalog or in {os.path.abspath(search_root)}")
 
 
-@mcp.tool()
-def read_file_metadata(file_path: str) -> str:
+@mcp.tool(annotations={"readOnly": True})
+async def read_file_metadata(file_path: str, ctx: Context[ServerSession, AppContext]) -> Any:
     """
     Read EXIF/IPTC/XMP metadata directly from an image file on disk.
     This reads metadata from the file itself, not from Lightroom catalog.
@@ -777,18 +749,18 @@ def read_file_metadata(file_path: str) -> str:
     Args:
         file_path: Absolute path to the image file to read metadata from.
 
-    Returns JSON with:
+    Returns dictionary with:
         - file: filename, path, size, modified date
         - exif: camera, lens, exposure settings, GPS, dimensions, dates
         - iptc: creator, copyright, caption (if available)
         - hash: MD5 hash for file identification
     """
     if not HAS_PILLOW:
-        return "Error: Pillow library not installed. Run: pip install Pillow"
+        raise McpError(ErrorCode.INTERNAL_ERROR, "Pillow library not installed. Run: pip install Pillow")
 
     file_path = os.path.normpath(file_path)
     if not os.path.isfile(file_path):
-        return f"Error: File not found: {file_path}"
+        raise McpError(ErrorCode.INVALID_PARAMS, f"File not found: {file_path}")
 
     try:
         # Basic file info
@@ -904,39 +876,39 @@ def read_file_metadata(file_path: str) -> str:
         result["rawExif"] = {k: v for k, v in exif_data.items() if v is not None}
 
         img.close()
-        return json.dumps(result)
+        return result
 
     except Exception as e:
-        return f"Error reading file metadata: {str(e)}"
+        raise McpError(ErrorCode.INTERNAL_ERROR, f"Error reading file metadata: {str(e)}")
 
 
-@mcp.tool()
-def find_photo_by_path(file_path: str) -> str:
+@mcp.tool(annotations={"readOnly": True})
+async def find_photo_by_path(file_path: str, ctx: Context[ServerSession, AppContext]) -> Any:
     """
     Find a photo in Lightroom catalog by its file path.
     Useful for locating a specific file you have on disk within Lightroom.
 
     Args:
         file_path: Full path to the image file to find in Lightroom.
-
-    Returns JSON with matching photo details or empty if not found.
     """
     file_path = os.path.normpath(file_path)
-
+    lrc = ctx.request_context.lifespan_context.lrc
     try:
         result = lrc.send_command("find_photo_by_path", {"path": file_path})
         if result and "result" in result:
-            return str(result["result"])
+            return result["result"]
         elif result and "error" in result:
-            return f"Error: {result['error']['message']}"
+            raise McpError(ErrorCode.INTERNAL_ERROR, f"Lightroom error: {result['error']['message']}")
         else:
-            return "Error: No response from Lightroom"
+            raise McpError(ErrorCode.INTERNAL_ERROR, "No response from Lightroom")
+    except McpError:
+        raise
     except Exception as e:
-        return f"Error: {str(e)}"
+        raise McpError(ErrorCode.INTERNAL_ERROR, f"Error: {str(e)}")
 
 
-@mcp.tool()
-def find_photo_by_filename(filename: str, exact_match: bool = False) -> str:
+@mcp.tool(annotations={"readOnly": True})
+async def find_photo_by_filename(filename: str, ctx: Context[ServerSession, AppContext], exact_match: bool = False) -> Any:
     """
     Find photos in Lightroom catalog by filename.
     Useful for locating photos when you have a file but don't know its location in Lightroom.
@@ -944,23 +916,24 @@ def find_photo_by_filename(filename: str, exact_match: bool = False) -> str:
     Args:
         filename: Filename to search for (e.g., "IMG_1234.jpg")
         exact_match: If True, requires exact filename match. If False (default), uses partial matching.
-
-    Returns JSON with array of matching photos.
     """
+    lrc = ctx.request_context.lifespan_context.lrc
     try:
         result = lrc.send_command("find_photo_by_filename", {"filename": filename, "exactMatch": exact_match})
         if result and "result" in result:
-            return str(result["result"])
+            return result["result"]
         elif result and "error" in result:
-            return f"Error: {result['error']['message']}"
+            raise McpError(ErrorCode.INTERNAL_ERROR, f"Lightroom error: {result['error']['message']}")
         else:
-            return "Error: No response from Lightroom"
+            raise McpError(ErrorCode.INTERNAL_ERROR, "No response from Lightroom")
+    except McpError:
+        raise
     except Exception as e:
-        return f"Error: {str(e)}"
+        raise McpError(ErrorCode.INTERNAL_ERROR, f"Error: {str(e)}")
 
 
-@mcp.tool()
-def find_photo_by_hash(file_path: str) -> str:
+@mcp.tool(annotations={"readOnly": True})
+async def find_photo_by_hash(file_path: str, ctx: Context[ServerSession, AppContext]) -> Any:
     """
     Find a photo in Lightroom by comparing file hash/checksum.
     Useful when a file may have been renamed or moved but content is identical.
@@ -970,12 +943,10 @@ def find_photo_by_hash(file_path: str) -> str:
 
     Args:
         file_path: Path to the image file to match.
-
-    Returns JSON with matching photo details or empty if not found.
     """
     file_path = os.path.normpath(file_path)
     if not os.path.isfile(file_path):
-        return f"Error: File not found: {file_path}"
+        raise McpError(ErrorCode.INVALID_PARAMS, f"File not found: {file_path}")
 
     # Calculate hash of the input file
     try:
@@ -985,17 +956,18 @@ def find_photo_by_hash(file_path: str) -> str:
                 hasher.update(chunk)
         source_hash = hasher.hexdigest()
     except Exception as e:
-        return f"Error reading file: {str(e)}"
+        raise McpError(ErrorCode.INTERNAL_ERROR, f"Error reading file: {str(e)}")
 
     # Get filename for initial search
     filename = os.path.basename(file_path)
+    lrc = ctx.request_context.lifespan_context.lrc
 
     try:
         result = lrc.send_command("find_photo_by_hash", {"filename": filename, "hash": source_hash})
         if result and "error" in result:
-            return f"Error: {result['error']['message']}"
+            raise McpError(ErrorCode.INTERNAL_ERROR, f"Lightroom error: {result['error']['message']}")
         if not result or "result" not in result:
-            return "Error: No response from Lightroom"
+            raise McpError(ErrorCode.INTERNAL_ERROR, "No response from Lightroom")
 
         payload = result["result"]
         if isinstance(payload, str):
@@ -1006,7 +978,7 @@ def find_photo_by_hash(file_path: str) -> str:
 
         candidates = payload.get("candidates", [])
         if not candidates:
-            return json.dumps({"found": False, "photo": None, "message": payload.get("message", "No matching photos")})
+            return {"found": False, "photo": None, "message": payload.get("message", "No matching photos")}
 
         # Compare hashes by reading candidate files
         for candidate in candidates:
@@ -1020,33 +992,36 @@ def find_photo_by_hash(file_path: str) -> str:
                     candidate_hash = hasher.hexdigest()
 
                     if candidate_hash == source_hash:
-                        return json.dumps({
+                        return {
                             "found": True,
                             "photo": candidate,
                             "sourceHash": source_hash,
                             "matchedHash": candidate_hash
-                        })
+                        }
                 except Exception:
                     continue
 
-        return json.dumps({
+        return {
             "found": False,
             "photo": None,
             "candidatesChecked": len(candidates),
             "message": "No exact hash match found among candidates"
-        })
+        }
 
+    except McpError:
+        raise
     except Exception as e:
-        return f"Error: {str(e)}"
+        raise McpError(ErrorCode.INTERNAL_ERROR, f"Error: {str(e)}")
 
 
-@mcp.tool()
-def get_photo_preview(
+@mcp.tool(annotations={"readOnly": True})
+async def get_photo_preview(
+    ctx: Context[ServerSession, AppContext],
     width: int = 800,
     height: int = 800,
-    photo_id: str = None,
-    save_path: str = None,
-) -> str:
+    photo_id: Optional[str | int] = None,
+    save_path: Optional[str] = None,
+) -> Any:
     """
     Get JPEG preview thumbnails for photos. Uses selected photos, or a specific photo by ID.
 
@@ -1058,58 +1033,60 @@ def get_photo_preview(
         height: Max height in pixels (default 800, max 4096).
         photo_id: Optional photo localId. If omitted, uses currently selected photos.
         save_path: Optional directory path. If set, saves JPEG file(s) there and returns paths instead of base64.
-
-    Returns: JSON with either base64-encoded previews or saved file path(s).
     """
-    if not (0 < width <= 4096):
-        return "Error: width must be between 1 and 4096"
-    if not (0 < height <= 4096):
-        return "Error: height must be between 1 and 4096"
+    # Validate dimensions
+    width = max(1, min(width, 4096))
+    height = max(1, min(height, 4096))
+
+    lrc = ctx.request_context.lifespan_context.lrc
 
     # If photo_id specified, select that photo first
-    if photo_id is not None and isinstance(photo_id, str) and photo_id.strip():
+    if photo_id is not None:
         try:
-            pid = int(photo_id.strip())
+            pid = int(str(photo_id).strip())
             select_result = lrc.send_command("select_photos", {"photoIds": [pid]})
             if select_result and "error" in select_result:
-                return f"Error selecting photo: {select_result['error'].get('message', select_result['error'])}"
+                raise McpError(ErrorCode.INTERNAL_ERROR, f"Error selecting photo: {select_result['error'].get('message', select_result['error'])}")
         except ValueError:
-            return f"Error: Invalid photo_id - must be a number"
+            raise McpError(ErrorCode.INVALID_PARAMS, f"Invalid photo_id: {photo_id}")
         except Exception as e:
-            return f"Error selecting photo: {str(e)}"
+            raise McpError(ErrorCode.INTERNAL_ERROR, f"Error selecting photo: {str(e)}")
 
-    # Get photo paths from Lightroom
+    # Get photo paths from Lightroom for selected photos
     try:
         result = lrc.send_command("get_metadata", {"fields": ["path"]})
+        if not result or "result" not in result:
+            if result and "error" in result:
+                raise McpError(ErrorCode.INTERNAL_ERROR, f"Lightroom error: {result['error'].get('message', result['error'])}")
+            raise McpError(ErrorCode.INTERNAL_ERROR, "No response from Lightroom")
+
+        payload = result["result"]
+        # Handle case where result might be a string (Old API behavior?)
+        if isinstance(payload, str):
+            try:
+                payload = json.loads(payload)
+            except json.JSONDecodeError:
+                raise McpError(ErrorCode.INTERNAL_ERROR, f"Invalid response from Lightroom: {payload}")
+
+        metadata_list = payload.get("metadata") or []
+        if not metadata_list:
+            return {"photos": [], "message": "No photos selected"}
+
+    except McpError:
+        raise
     except Exception as e:
-        return f"Error: {str(e)}"
-
-    if result and "error" in result:
-        return f"Error: {result['error'].get('message', result['error'])}"
-    if not result or "result" not in result:
-        return "Error: No response from Lightroom"
-
-    payload = result["result"]
-    if isinstance(payload, str):
-        try:
-            payload = json.loads(payload)
-        except json.JSONDecodeError:
-            return f"Error: Invalid response: {payload}"
-
-    metadata_list = payload.get("metadata") or []
-    if not metadata_list:
-        return json.dumps({"photos": []})
+        raise McpError(ErrorCode.INTERNAL_ERROR, f"Error getting metadata: {str(e)}")
 
     # Generate previews locally
     results = []
     saved_paths = []
     seen_filenames = set()
 
-    for i, item in enumerate(metadata_list):
+    for item in metadata_list:
         local_id = item.get("localId", "")
         photo_meta = item.get("metadata", {})
         file_path = photo_meta.get("path", "")
-        filename = os.path.basename(file_path) if file_path else f"photo_{local_id}"
+        filename = os.path.basename(file_path) if file_path else f"photo_{local_id}.jpg"
 
         if not file_path:
             results.append({
@@ -1135,33 +1112,32 @@ def get_photo_preview(
             save_dir = os.path.normpath(save_path)
             try:
                 os.makedirs(save_dir, exist_ok=True)
-            except OSError as e:
-                results.append({
-                    "localId": local_id,
-                    "filename": filename,
-                    "error": f"Cannot create directory: {e}"
-                })
-                continue
 
-            base_name = _sanitize_filename(filename)
-            name = base_name
-            idx = 0
-            while name in seen_filenames:
-                idx += 1
-                root, _ = os.path.splitext(base_name)
-                name = f"{root}_{idx}.jpg"
-            seen_filenames.add(name)
+                base_name = sanitize_filename(filename)
+                name = base_name
+                idx = 0
+                while name in seen_filenames or os.path.exists(os.path.join(save_dir, name)):
+                    idx += 1
+                    root, ext = os.path.splitext(base_name)
+                    name = f"{root}_{idx}{ext}"
 
-            out_path = os.path.join(save_dir, name)
-            try:
+                seen_filenames.add(name)
+                out_path = os.path.join(save_dir, name)
+
                 with open(out_path, "wb") as f:
                     f.write(jpeg_bytes)
                 saved_paths.append(out_path)
-            except OSError as e:
+
                 results.append({
                     "localId": local_id,
                     "filename": filename,
-                    "error": f"Cannot write file: {e}"
+                    "savePath": out_path
+                })
+            except Exception as e:
+                results.append({
+                    "localId": local_id,
+                    "filename": filename,
+                    "error": f"Failed to save preview: {str(e)}"
                 })
         else:
             # Return as base64
@@ -1171,35 +1147,86 @@ def get_photo_preview(
                 "jpegBase64": base64.b64encode(jpeg_bytes).decode('ascii')
             })
 
-    if save_path:
-        return json.dumps({"saved": saved_paths})
+    # Return summary consistent with specifications
+    response = {"photos": results}
+    if save_path and saved_paths:
+        response["savedPaths"] = saved_paths
 
-    return json.dumps({"photos": results})
+    return response
 
 
 # ============================================================================
 # Develop Presets Tools
 # ============================================================================
 
-@mcp.tool()
-def list_develop_presets() -> str:
+
+@mcp.tool(annotations={"readOnly": True})
+async def get_develop_settings(ctx: Context[ServerSession, AppContext]) -> Any:
+    """
+    Get develop/Camera Raw settings for the currently selected photos.
+    Returns list of photo objects containing develop settings.
+    """
+    lrc = ctx.request_context.lifespan_context.lrc
+    try:
+        result = lrc.send_command("get_develop_settings")
+        if result and "result" in result:
+            return result["result"]
+        elif result and "error" in result:
+            raise McpError(ErrorCode.INTERNAL_ERROR, f"Lightroom error: {result['error']['message']}")
+        else:
+            raise McpError(ErrorCode.INTERNAL_ERROR, "No response from Lightroom")
+    except McpError:
+        raise
+    except Exception as e:
+        raise McpError(ErrorCode.INTERNAL_ERROR, f"Error: {str(e)}")
+
+@mcp.tool(annotations={"destructive": True})
+async def set_develop_settings(settings: dict, ctx: Context[ServerSession, AppContext]) -> str:
+    """
+    Set develop/Camera Raw settings for the currently selected photos.
+
+    Args:
+        settings: Dictionary of parameter names to values (e.g., {"Exposure": 1.0, "Contrast": 25}).
+    """
+    if not isinstance(settings, dict):
+        raise McpError(ErrorCode.INVALID_PARAMS, "settings must be a dictionary")
+
+    lrc = ctx.request_context.lifespan_context.lrc
+    try:
+        result = lrc.send_command("set_develop_settings", {"settings": settings})
+        if result and "result" in result:
+            return "Success"
+        elif result and "error" in result:
+            raise McpError(ErrorCode.INTERNAL_ERROR, f"Lightroom error: {result['error']['message']}")
+        else:
+            raise McpError(ErrorCode.INTERNAL_ERROR, "No response from Lightroom")
+    except McpError:
+        raise
+    except Exception as e:
+        raise McpError(ErrorCode.INTERNAL_ERROR, f"Error: {str(e)}")
+
+@mcp.tool(annotations={"readOnly": True})
+async def list_develop_presets(ctx: Context[ServerSession, AppContext]) -> Any:
     """
     List all develop preset folders and their presets.
-    Returns JSON string with array of preset objects (name, uuid, folder).
+    Returns list of preset objects (name, uuid, folder).
     """
+    lrc = ctx.request_context.lifespan_context.lrc
     try:
         result = lrc.send_command("list_develop_presets")
         if result and "result" in result:
-            return str(result["result"])
+            return result["result"]
         elif result and "error" in result:
-            return f"Error: {result['error']['message']}"
+            raise McpError(ErrorCode.INTERNAL_ERROR, f"Lightroom error: {result['error']['message']}")
         else:
-            return "Error: No response from Lightroom"
+            raise McpError(ErrorCode.INTERNAL_ERROR, "No response from Lightroom")
+    except McpError:
+        raise
     except Exception as e:
-        return f"Error: {str(e)}"
+        raise McpError(ErrorCode.INTERNAL_ERROR, f"Error: {str(e)}")
 
-@mcp.tool()
-def apply_develop_preset(preset_name: str = None, preset_uuid: str = None) -> str:
+@mcp.tool(annotations={"destructive": True})
+async def apply_develop_preset(preset_name: Optional[str] = None, preset_uuid: Optional[str] = None, ctx: Context[ServerSession, AppContext] = None) -> str:
     """
     Apply a develop preset to the currently selected photos.
 
@@ -1208,27 +1235,28 @@ def apply_develop_preset(preset_name: str = None, preset_uuid: str = None) -> st
         preset_uuid: UUID of the preset to apply (optional if preset_name is provided).
     """
     if not preset_name and not preset_uuid:
-        return "Error: Either preset_name or preset_uuid must be provided"
+        raise McpError(ErrorCode.INVALID_PARAMS, "Either preset_name or preset_uuid must be provided")
 
+    lrc = ctx.request_context.lifespan_context.lrc
     try:
         params = {}
-        if preset_name:
-            params["presetName"] = preset_name
-        if preset_uuid:
-            params["presetUuid"] = preset_uuid
+        if preset_name: params["presetName"] = preset_name
+        if preset_uuid: params["presetUuid"] = preset_uuid
 
         result = lrc.send_command("apply_develop_preset", params)
         if result and "result" in result:
             return "Success"
         elif result and "error" in result:
-            return f"Error: {result['error']['message']}"
+            raise McpError(ErrorCode.INTERNAL_ERROR, f"Lightroom error: {result['error']['message']}")
         else:
-            return "Error: No response from Lightroom"
+            raise McpError(ErrorCode.INTERNAL_ERROR, "No response from Lightroom")
+    except McpError:
+        raise
     except Exception as e:
-        return f"Error: {str(e)}"
+        raise McpError(ErrorCode.INTERNAL_ERROR, f"Error: {str(e)}")
 
-@mcp.tool()
-def create_snapshot(name: str) -> str:
+@mcp.tool(annotations={"destructive": True})
+async def create_snapshot(name: str, ctx: Context[ServerSession, AppContext]) -> str:
     """
     Create a develop snapshot for the currently selected photos.
 
@@ -1236,42 +1264,48 @@ def create_snapshot(name: str) -> str:
         name: Name for the snapshot.
     """
     if not name or not isinstance(name, str):
-        return "Error: name must be a non-empty string"
+        raise McpError(ErrorCode.INVALID_PARAMS, "name must be a non-empty string")
 
+    lrc = ctx.request_context.lifespan_context.lrc
     try:
         result = lrc.send_command("create_snapshot", {"name": name})
         if result and "result" in result:
             return "Success"
         elif result and "error" in result:
-            return f"Error: {result['error']['message']}"
+            raise McpError(ErrorCode.INTERNAL_ERROR, f"Lightroom error: {result['error']['message']}")
         else:
-            return "Error: No response from Lightroom"
+            raise McpError(ErrorCode.INTERNAL_ERROR, "No response from Lightroom")
+    except McpError:
+        raise
     except Exception as e:
-        return f"Error: {str(e)}"
+        raise McpError(ErrorCode.INTERNAL_ERROR, f"Error: {str(e)}")
 
-@mcp.tool()
-def list_snapshots() -> str:
+@mcp.tool(annotations={"readOnly": True})
+async def list_snapshots(ctx: Context[ServerSession, AppContext]) -> Any:
     """
     Get all develop snapshots for the currently selected photos.
-    Returns JSON string with array of snapshot objects (id, name).
+    Returns list of snapshot objects (id, name).
     """
+    lrc = ctx.request_context.lifespan_context.lrc
     try:
         result = lrc.send_command("list_snapshots")
         if result and "result" in result:
-            return str(result["result"])
+            return result["result"]
         elif result and "error" in result:
-            return f"Error: {result['error']['message']}"
+            raise McpError(ErrorCode.INTERNAL_ERROR, f"Lightroom error: {result['error']['message']}")
         else:
-            return "Error: No response from Lightroom"
+            raise McpError(ErrorCode.INTERNAL_ERROR, "No response from Lightroom")
+    except McpError:
+        raise
     except Exception as e:
-        return f"Error: {str(e)}"
+        raise McpError(ErrorCode.INTERNAL_ERROR, f"Error: {str(e)}")
 
 # ============================================================================
 # Selection and Navigation Tools
 # ============================================================================
 
-@mcp.tool()
-def select_photos(photo_ids: list[int]) -> str:
+@mcp.tool(annotations={"destructive": True})
+async def select_photos(photo_ids: list[int], ctx: Context[ServerSession, AppContext]) -> str:
     """
     Set the photo selection by providing a list of photo local identifiers.
 
@@ -1279,89 +1313,100 @@ def select_photos(photo_ids: list[int]) -> str:
         photo_ids: Array of photo local identifiers (numbers).
     """
     if not isinstance(photo_ids, list):
-        return "Error: photo_ids must be an array"
+        raise McpError(ErrorCode.INVALID_PARAMS, "photo_ids must be an array")
 
+    lrc = ctx.request_context.lifespan_context.lrc
     try:
         result = lrc.send_command("select_photos", {"photoIds": photo_ids})
         if result and "result" in result:
             return "Success"
         elif result and "error" in result:
-            return f"Error: {result['error']['message']}"
+            raise McpError(ErrorCode.INTERNAL_ERROR, f"Lightroom error: {result['error']['message']}")
         else:
-            return "Error: No response from Lightroom"
+            raise McpError(ErrorCode.INTERNAL_ERROR, "No response from Lightroom")
+    except McpError:
+        raise
     except Exception as e:
-        return f"Error: {str(e)}"
+        raise McpError(ErrorCode.INTERNAL_ERROR, f"Error: {str(e)}")
 
-@mcp.tool()
-def select_all() -> str:
+@mcp.tool(annotations={"destructive": True})
+async def select_all(ctx: Context[ServerSession, AppContext]) -> str:
     """
     Select all photos in the filmstrip.
     """
+    lrc = ctx.request_context.lifespan_context.lrc
     try:
         result = lrc.send_command("select_all")
         if result and "result" in result:
             return "Success"
         elif result and "error" in result:
-            return f"Error: {result['error']['message']}"
+            raise McpError(ErrorCode.INTERNAL_ERROR, f"Lightroom error: {result['error']['message']}")
         else:
-            return "Error: No response from Lightroom"
+            raise McpError(ErrorCode.INTERNAL_ERROR, "No response from Lightroom")
+    except McpError:
+        raise
     except Exception as e:
-        return f"Error: {str(e)}"
+        raise McpError(ErrorCode.INTERNAL_ERROR, f"Error: {str(e)}")
 
-@mcp.tool()
-def select_none() -> str:
+@mcp.tool(annotations={"destructive": True})
+async def select_none(ctx: Context[ServerSession, AppContext]) -> str:
     """
     Clear the photo selection (deselect all).
     """
+    lrc = ctx.request_context.lifespan_context.lrc
     try:
         result = lrc.send_command("select_none")
         if result and "result" in result:
             return "Success"
         elif result and "error" in result:
-            return f"Error: {result['error']['message']}"
+            raise McpError(ErrorCode.INTERNAL_ERROR, f"Lightroom error: {result['error']['message']}")
         else:
-            return "Error: No response from Lightroom"
+            raise McpError(ErrorCode.INTERNAL_ERROR, "No response from Lightroom")
+    except McpError:
+        raise
     except Exception as e:
-        return f"Error: {str(e)}"
+        raise McpError(ErrorCode.INTERNAL_ERROR, f"Error: {str(e)}")
 
-@mcp.tool()
-def next_photo() -> str:
+@mcp.tool(annotations={"destructive": True})
+async def next_photo(ctx: Context[ServerSession, AppContext]) -> str:
     """
     Advance the selection to the next photo in the filmstrip.
     """
+    lrc = ctx.request_context.lifespan_context.lrc
     try:
         result = lrc.send_command("next_photo")
         if result and "result" in result:
             return "Success"
         elif result and "error" in result:
-            return f"Error: {result['error']['message']}"
+            raise McpError(ErrorCode.INTERNAL_ERROR, f"Lightroom error: {result['error']['message']}")
         else:
-            return "Error: No response from Lightroom"
+            raise McpError(ErrorCode.INTERNAL_ERROR, "No response from Lightroom")
+    except McpError:
+        raise
     except Exception as e:
-        return f"Error: {str(e)}"
+        raise McpError(ErrorCode.INTERNAL_ERROR, f"Error: {str(e)}")
 
-@mcp.tool()
-def previous_photo() -> str:
+@mcp.tool(annotations={"destructive": True})
+async def previous_photo(ctx: Context[ServerSession, AppContext]) -> str:
     """
     Move the selection to the previous photo in the filmstrip.
     """
+    lrc = ctx.request_context.lifespan_context.lrc
     try:
         result = lrc.send_command("previous_photo")
         if result and "result" in result:
             return "Success"
         elif result and "error" in result:
-            return f"Error: {result['error']['message']}"
+            raise McpError(ErrorCode.INTERNAL_ERROR, f"Lightroom error: {result['error']['message']}")
         else:
-            return "Error: No response from Lightroom"
+            raise McpError(ErrorCode.INTERNAL_ERROR, "No response from Lightroom")
+    except McpError:
+        raise
     except Exception as e:
-        return f"Error: {str(e)}"
+        raise McpError(ErrorCode.INTERNAL_ERROR, f"Error: {str(e)}")
 
-# ============================================================================
-# Module and View Control Tools
-# ============================================================================
-
-@mcp.tool()
-def switch_module(module: str) -> str:
+@mcp.tool(annotations={"destructive": True})
+async def switch_module(module: str, ctx: Context[ServerSession, AppContext]) -> str:
     """
     Switch to a different Lightroom module.
 
@@ -1369,39 +1414,45 @@ def switch_module(module: str) -> str:
         module: Module name - one of: 'library', 'develop', 'map', 'book', 'slideshow', 'print', 'web'.
     """
     valid_modules = ['library', 'develop', 'map', 'book', 'slideshow', 'print', 'web']
-    if module not in valid_modules:
-        return f"Error: module must be one of {valid_modules}"
+    if module.lower() not in valid_modules:
+        raise McpError(ErrorCode.INVALID_PARAMS, f"module must be one of {valid_modules}")
 
+    lrc = ctx.request_context.lifespan_context.lrc
     try:
         result = lrc.send_command("switch_module", {"module": module})
         if result and "result" in result:
             return "Success"
         elif result and "error" in result:
-            return f"Error: {result['error']['message']}"
+            raise McpError(ErrorCode.INTERNAL_ERROR, f"Lightroom error: {result['error']['message']}")
         else:
-            return "Error: No response from Lightroom"
+            raise McpError(ErrorCode.INTERNAL_ERROR, "No response from Lightroom")
+    except McpError:
+        raise
     except Exception as e:
-        return f"Error: {str(e)}"
+        raise McpError(ErrorCode.INTERNAL_ERROR, f"Error: {str(e)}")
 
-@mcp.tool()
-def get_current_module() -> str:
+@mcp.tool(annotations={"readOnly": True})
+async def get_current_module(ctx: Context[ServerSession, AppContext]) -> str:
     """
     Get the name of the currently active module.
-    Returns JSON string with module name.
+    Returns module name.
     """
+    lrc = ctx.request_context.lifespan_context.lrc
     try:
         result = lrc.send_command("get_current_module")
         if result and "result" in result:
-            return str(result["result"])
+            return result["result"]
         elif result and "error" in result:
-            return f"Error: {result['error']['message']}"
+            raise McpError(ErrorCode.INTERNAL_ERROR, f"Lightroom error: {result['error']['message']}")
         else:
-            return "Error: No response from Lightroom"
+            raise McpError(ErrorCode.INTERNAL_ERROR, "No response from Lightroom")
+    except McpError:
+        raise
     except Exception as e:
-        return f"Error: {str(e)}"
+        raise McpError(ErrorCode.INTERNAL_ERROR, f"Error: {str(e)}")
 
-@mcp.tool()
-def show_view(view: str) -> str:
+@mcp.tool(annotations={"destructive": True})
+async def show_view(view: str, ctx: Context[ServerSession, AppContext]) -> str:
     """
     Switch the application's view mode.
 
@@ -1414,25 +1465,28 @@ def show_view(view: str) -> str:
                    'develop_loupe', 'develop_before_after_horiz', 'develop_before_after_vert',
                    'develop_before', 'develop_reference_horiz', 'develop_reference_vert']
     if view not in valid_views:
-        return f"Error: view must be one of {valid_views}"
+        raise McpError(ErrorCode.INVALID_PARAMS, f"view must be one of {valid_views}")
 
+    lrc = ctx.request_context.lifespan_context.lrc
     try:
         result = lrc.send_command("show_view", {"view": view})
         if result and "result" in result:
             return "Success"
         elif result and "error" in result:
-            return f"Error: {result['error']['message']}"
+            raise McpError(ErrorCode.INTERNAL_ERROR, f"Lightroom error: {result['error']['message']}")
         else:
-            return "Error: No response from Lightroom"
+            raise McpError(ErrorCode.INTERNAL_ERROR, "No response from Lightroom")
+    except McpError:
+        raise
     except Exception as e:
-        return f"Error: {str(e)}"
+        raise McpError(ErrorCode.INTERNAL_ERROR, f"Error: {str(e)}")
 
 # ============================================================================
 # Advanced Search and Organization Tools
 # ============================================================================
 
-@mcp.tool()
-def find_photos(search_desc: dict) -> str:
+@mcp.tool(annotations={"readOnly": True})
+async def find_photos(search_desc: dict, ctx: Context[ServerSession, AppContext]) -> Any:
     """
     Search for photos using smart collection-style search criteria.
 
@@ -1449,24 +1503,27 @@ def find_photos(search_desc: dict) -> str:
                 {"criteria": "captureTime", "operation": "inLast", "value": 90, "value_units": "days"},
                 "combine": "union"
             }
-    Returns JSON string with array of matching photos.
+    Returns list of matching photos.
     """
     if not isinstance(search_desc, dict):
-        return "Error: search_desc must be a dictionary"
+        raise McpError(ErrorCode.INVALID_PARAMS, "search_desc must be a dictionary")
 
+    lrc = ctx.request_context.lifespan_context.lrc
     try:
         result = lrc.send_command("find_photos", {"searchDesc": search_desc})
         if result and "result" in result:
-            return str(result["result"])
+            return result["result"]
         elif result and "error" in result:
-            return f"Error: {result['error']['message']}"
+            raise McpError(ErrorCode.INTERNAL_ERROR, f"Lightroom error: {result['error']['message']}")
         else:
-            return "Error: No response from Lightroom"
+            raise McpError(ErrorCode.INTERNAL_ERROR, "No response from Lightroom")
+    except McpError:
+        raise
     except Exception as e:
-        return f"Error: {str(e)}"
+        raise McpError(ErrorCode.INTERNAL_ERROR, f"Error: {str(e)}")
 
-@mcp.tool()
-def create_smart_collection(name: str, search_desc: dict) -> str:
+@mcp.tool(annotations={"destructive": True})
+async def create_smart_collection(name: str, search_desc: dict, ctx: Context[ServerSession, AppContext]) -> str:
     """
     Create a smart collection with search criteria.
 
@@ -1475,50 +1532,57 @@ def create_smart_collection(name: str, search_desc: dict) -> str:
         search_desc: Search descriptor dictionary (same format as find_photos).
     """
     if not name or not isinstance(name, str):
-        return "Error: name must be a non-empty string"
+        raise McpError(ErrorCode.INVALID_PARAMS, "name must be a non-empty string")
     if not isinstance(search_desc, dict):
-        return "Error: search_desc must be a dictionary"
+        raise McpError(ErrorCode.INVALID_PARAMS, "search_desc must be a dictionary")
 
+    lrc = ctx.request_context.lifespan_context.lrc
     try:
         result = lrc.send_command("create_smart_collection", {"name": name, "searchDesc": search_desc})
         if result and "result" in result:
             return "Success"
         elif result and "error" in result:
-            return f"Error: {result['error']['message']}"
+            raise McpError(ErrorCode.INTERNAL_ERROR, f"Lightroom error: {result['error']['message']}")
         else:
-            return "Error: No response from Lightroom"
+            raise McpError(ErrorCode.INTERNAL_ERROR, "No response from Lightroom")
+    except McpError:
+        raise
     except Exception as e:
-        return f"Error: {str(e)}"
+        raise McpError(ErrorCode.INTERNAL_ERROR, f"Error: {str(e)}")
 
-@mcp.tool()
-def list_folders() -> str:
+@mcp.tool(annotations={"readOnly": True})
+async def list_folders(ctx: Context[ServerSession, AppContext]) -> Any:
     """
     List all folders in the catalog hierarchy.
-    Returns JSON string with array of folder objects (name, path, id).
+    Returns list of folder objects (name, path, id).
     """
+    lrc = ctx.request_context.lifespan_context.lrc
     try:
         result = lrc.send_command("list_folders")
         if result and "result" in result:
-            return str(result["result"])
+            return result["result"]
         elif result and "error" in result:
-            return f"Error: {result['error']['message']}"
+            raise McpError(ErrorCode.INTERNAL_ERROR, f"Lightroom error: {result['error']['message']}")
         else:
-            return "Error: No response from Lightroom"
+            raise McpError(ErrorCode.INTERNAL_ERROR, "No response from Lightroom")
+    except McpError:
+        raise
     except Exception as e:
-        return f"Error: {str(e)}"
+        raise McpError(ErrorCode.INTERNAL_ERROR, f"Error: {str(e)}")
 
 # ============================================================================
 # Photo Operations Tools
 # ============================================================================
 
-@mcp.tool()
-def create_virtual_copy(copy_name: str = None) -> str:
+@mcp.tool(annotations={"destructive": True})
+async def create_virtual_copy(copy_name: Optional[str] = None, ctx: Context[ServerSession, AppContext] = None) -> str:
     """
     Create virtual copies of the currently selected photos.
 
     Args:
         copy_name: Optional name to apply to each virtual copy.
     """
+    lrc = ctx.request_context.lifespan_context.lrc
     try:
         params = {}
         if copy_name:
@@ -1528,33 +1592,44 @@ def create_virtual_copy(copy_name: str = None) -> str:
         if result and "result" in result:
             return "Success"
         elif result and "error" in result:
-            return f"Error: {result['error']['message']}"
+            raise McpError(ErrorCode.INTERNAL_ERROR, f"Lightroom error: {result['error']['message']}")
         else:
-            return "Error: No response from Lightroom"
+            raise McpError(ErrorCode.INTERNAL_ERROR, "No response from Lightroom")
+    except McpError:
+        raise
     except Exception as e:
-        return f"Error: {str(e)}"
+        raise McpError(ErrorCode.INTERNAL_ERROR, f"Error: {str(e)}")
 
-@mcp.tool()
-def rotate_photo(direction: str) -> str:
+@mcp.tool(annotations={"destructive": True})
+async def rotate_photo(direction: str, ctx: Context[ServerSession, AppContext]) -> str:
     """
     Rotate the currently selected photos.
 
     Args:
         direction: Rotation direction - either 'left' or 'right'.
     """
-    if direction not in ['left', 'right']:
-        return "Error: direction must be 'left' or 'right'"
+    if direction.lower() not in ['left', 'right']:
+        raise McpError(ErrorCode.INVALID_PARAMS, "direction must be 'left' or 'right'")
 
+    lrc = ctx.request_context.lifespan_context.lrc
     try:
         result = lrc.send_command("rotate_photo", {"direction": direction})
         if result and "result" in result:
             return "Success"
         elif result and "error" in result:
-            return f"Error: {result['error']['message']}"
+            raise McpError(ErrorCode.INTERNAL_ERROR, f"Lightroom error: {result['error']['message']}")
         else:
-            return "Error: No response from Lightroom"
+            raise McpError(ErrorCode.INTERNAL_ERROR, "No response from Lightroom")
+    except McpError:
+        raise
     except Exception as e:
-        return f"Error: {str(e)}"
+        raise McpError(ErrorCode.INTERNAL_ERROR, f"Error: {str(e)}")
+
+@mcp.resource("lightroom://status")
+def get_lightroom_status() -> dict:
+    """Connection status of the Lightroom broker and plugin."""
+    from lrc_client import check_plugin_status
+    return check_plugin_status()
 
 if __name__ == "__main__":
     mcp.run()

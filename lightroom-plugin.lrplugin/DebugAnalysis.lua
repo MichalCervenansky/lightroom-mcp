@@ -6,41 +6,63 @@ Displays plugin status, server state, and diagnostic information
 local LrDialogs = import 'LrDialogs'
 local LrLogger = import 'LrLogger'
 local LrApplication = import 'LrApplication'
-local LrSocket = import 'LrSocket'
 
 local logger = LrLogger( 'MCPBridge' )
 logger:enable( 'print' )
 logger:enable( 'logfile' )
 
+-- Load version from Info.lua directly since _PLUGIN.version may not be populated
+local pluginInfo = require 'Info'
+local versionTable = (pluginInfo and pluginInfo.VERSION) or {}
+local PLUGIN_VERSION = string.format("%d.%d.%d",
+    versionTable.major or 0,
+    versionTable.minor or 0,
+    versionTable.revision or 0
+)
+
 -- Collect debug information
 local function collectDebugInfo()
     local info = {}
-    
+
     -- Plugin info
-    info.pluginPath = tostring(_PLUGIN.path)
-    info.pluginVersion = tostring(_PLUGIN.version)
-    info.pluginName = tostring(_PLUGIN.name)
-    
+    info.pluginId = tostring(_PLUGIN.id or "nil")
+    info.pluginPath = tostring(_PLUGIN.path or "nil")
+    info.pluginVersion = PLUGIN_VERSION  -- Loaded from Info.lua
+    info.pluginName = tostring(_PLUGIN.name or (pluginInfo and pluginInfo.LrPluginName) or "MCP Bridge")
+
     -- Server state
     info.serverRunning = _G.mcpServerRunning or false
-    
+
     -- Catalog info
     local catalog = LrApplication.activeCatalog()
     if catalog then
         local success, path = pcall( function() return catalog:getPath() end )
         info.catalogPath = success and path or "Unable to get path"
-        
-        local success2, allPhotos = pcall( function() return catalog:getAllPhotos() end )
-        info.photoCount = (success2 and allPhotos) and #allPhotos or 0
-        
+
+        -- getAllPhotos can fail in certain contexts; use a count via find instead
+        local success2, count = pcall( function()
+            local photos = catalog:findPhotos( { searchDesc = { { criteria = "rating", operation = ">=", value = 0 } } } )
+            return photos and #photos or 0
+        end )
+        if success2 then
+            info.photoCount = count
+        else
+            -- Fallback: just show unknown
+            info.photoCount = "N/A"
+        end
+
         local success3, targetPhotos = pcall( function() return catalog:getTargetPhotos() end )
-        info.selectedPhotoCount = (success3 and targetPhotos) and #targetPhotos or 0
+        if success3 and targetPhotos then
+            info.selectedPhotoCount = #targetPhotos
+        else
+            info.selectedPhotoCount = "N/A"
+        end
     else
         info.catalogPath = "No catalog"
         info.photoCount = 0
         info.selectedPhotoCount = 0
     end
-    
+
     -- Check if port 54321 is accessible (basic check)
     info.portStatus = "Unknown"
     if info.serverRunning then
@@ -48,7 +70,7 @@ local function collectDebugInfo()
     else
         info.portStatus = "Server flag is false"
     end
-    
+
     -- Read plugin_debug.log if it exists
     local logPath = "D:\\Projects\\lightroom-mcp\\plugin_debug.log"
     local logFile = io.open( logPath, "r" )
@@ -67,7 +89,7 @@ local function collectDebugInfo()
     else
         info.lastLogLines = "Log file not found"
     end
-    
+
     return info
 end
 
@@ -78,6 +100,7 @@ local function formatDebugInfo( info )
         "",
         "Plugin Information:",
         "  Path: " .. info.pluginPath,
+        "  ID: " .. info.pluginId,
         "  Version: " .. info.pluginVersion,
         "  Name: " .. info.pluginName,
         "",
@@ -95,7 +118,7 @@ local function formatDebugInfo( info )
         "",
         "=== End Debug Analysis ===",
     }
-    
+
     return table.concat( lines, "\n" )
 end
 
@@ -114,23 +137,23 @@ end
 -- Main function
 local function runDebugAnalysis()
     logger:info( "Debug Analysis: Starting..." )
-    
+
     local info = collectDebugInfo()
     local reportPath = writeDebugReport( info )
-    
+
     -- Display dialog
     local message = formatDebugInfo( info )
     local reportMsg = ""
     if reportPath then
         reportMsg = "\n\nDebug report saved to:\n" .. reportPath
     end
-    
-    LrDialogs.message( 
-        "MCP Bridge Debug Analysis", 
+
+    LrDialogs.message(
+        "MCP Bridge Debug Analysis",
         message .. reportMsg,
         "info"
     )
-    
+
     logger:info( "Debug Analysis: Completed" )
 end
 

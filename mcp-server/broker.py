@@ -784,7 +784,7 @@ def run_socket_server():
 # Web UI Dashboard
 # ============================================================================
 
-DASHBOARD_HTML = """
+DASHBOARD_HTML = r"""
 <!DOCTYPE html>
 <html lang="en">
 <head>

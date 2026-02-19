@@ -7,6 +7,7 @@ Much simpler than the previous socket-based implementation.
 
 import json
 import logging
+import os
 import subprocess
 import sys
 import time
@@ -17,10 +18,13 @@ import requests
 
 logger = logging.getLogger(__name__)
 
-# Broker configuration
-BROKER_URL = "http://127.0.0.1:8085"
+# Version
+__version__ = "1.0.0"
+
+# Broker configuration with environment variable overrides
+BROKER_URL = os.environ.get("LRC_BROKER_URL", "http://127.0.0.1:8085")
 BROKER_SCRIPT = Path(__file__).parent / "broker.py"
-REQUEST_TIMEOUT = 35  # Slightly longer than broker's internal timeout
+REQUEST_TIMEOUT = int(os.environ.get("LRC_REQUEST_TIMEOUT", "35"))  # Slightly longer than broker's internal timeout
 
 
 class LrCClient:
@@ -117,8 +121,16 @@ class LrCClient:
             raise ConnectionError(f"Communication error: {e}")
 
     def close(self):
-        """Close the client (no-op for HTTP client)."""
-        pass
+        """Close the client and terminate broker if started by this instance."""
+        if self._broker_process:
+            logger.info("Terminating broker process...")
+            try:
+                self._broker_process.terminate()
+                self._broker_process.wait(timeout=2)
+            except Exception as e:
+                logger.error(f"Error terminating broker: {e}")
+                self._broker_process.kill()
+            self._broker_process = None
 
     def __enter__(self):
         return self

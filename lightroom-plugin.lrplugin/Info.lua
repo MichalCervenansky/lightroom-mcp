@@ -46,5 +46,5 @@ return {
         },
     },
 
-    VERSION = { major = 0, minor = 1, revision = 0 },
+    VERSION = { major = 0, minor = 1, revision = 0, build = 100, display = "0.1.0" },
 }
