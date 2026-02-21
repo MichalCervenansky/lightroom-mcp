@@ -113,11 +113,109 @@ The AI also lacks context. It doesn't know:
 
 Think of it as a first pass that handles the obvious culls, not a replacement for your eye.
 
-## What I'd Do Differently
+## Second Try: Optimized Workflow (10x Fewer API Calls)
 
-1. **Batch the previews upfront**: Generate all previews first, then have Claude rate them. Avoids Lightroom connection issues mid-workflow.
+After the first attempt, I realized the workflow was wasteful. Rating 50 photos required ~150 MCP calls and burned through tokens reading the same connection boilerplate repeatedly. Here's the optimized approach:
 
-2. **Add a "compare" mode**: Sometimes you want to pick the best from a series of similar shots. A side-by-side comparison tool would help.
+### Key Optimizations
+
+**1. Extract ALL previews upfront with a local script**
+
+Instead of calling `get_photo_preview()` through MCP for each photo, run a Python script locally:
+
+```bash
+python scripts/batch_rating_workflow.py /path/to/raw/folder --extract-only
+```
+
+This extracts embedded JPEGs from RAW files using `rawpy` - no MCP calls needed. 819 photos extracted in under 2 minutes.
+
+**2. Calculate localIds instead of looking them up**
+
+Lightroom assigns sequential `localId` values during import. If you know ONE photo's localId, you can calculate the rest:
+
+```python
+# DSCF3987 has localId 1022008
+# DSCF4022 is 35 files later (minus 1 for missing frame 4000)
+# So DSCF4022 = 1022008 + 34 = 1022042
+```
+
+This eliminates `find_photo_by_filename()` calls entirely. For 50 photos, that's 50 fewer MCP round-trips.
+
+**3. Batch photos by rating, apply once per rating level**
+
+Instead of:
+```
+select_photos([id1]) -> set_rating(4)  # 2 calls
+select_photos([id2]) -> set_rating(4)  # 2 calls
+select_photos([id3]) -> set_rating(4)  # 2 calls
+# ... 100 calls for 50 photos
+```
+
+Do this:
+```
+select_photos([id1, id2, id3, ...all 4-star ids])  # 1 call
+set_rating(4)                                       # 1 call
+# ... 6-10 calls total for 50 photos
+```
+
+### The New Workflow
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│ PHASE 1: Local (No MCP)                                         │
+├─────────────────────────────────────────────────────────────────┤
+│ 1. Run batch_rating_workflow.py --extract-only                  │
+│    → Extracts 819 previews to /tmp/lr_previews/                 │
+│                                                                 │
+│ 2. Have Claude read previews in batches of 5-10                 │
+│    → Claude outputs ratings as JSON                             │
+│    → {"DSCF3987": 3, "DSCF3988": 4, "DSCF3989": 4, ...}        │
+└─────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────────┐
+│ PHASE 2: Apply Ratings (Minimal MCP)                            │
+├─────────────────────────────────────────────────────────────────┤
+│ 3. Group photos by rating level                                 │
+│    → 5-star: [1022016, 1022042, 1022049]                       │
+│    → 4-star: [1022010, 1022011, ...]                           │
+│    → 3-star: [1022008, 1022009, ...]                           │
+│                                                                 │
+│ 4. Apply ratings in 3-6 MCP calls total                         │
+│    → select_photos([all 5-star ids]) + set_rating(5)           │
+│    → select_photos([all 4-star ids]) + set_rating(4)           │
+│    → select_photos([all 3-star ids]) + set_rating(3)           │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### Results Comparison
+
+| Metric | First Try | Optimized |
+|--------|-----------|-----------|
+| MCP calls (50 photos) | ~150 | 6 |
+| Preview generation | Via MCP | Local script |
+| LocalId lookup | Per-photo API call | Calculated |
+| Rating application | Per-photo | Batched by rating |
+
+### The Improved Prompt
+
+The original prompt focused on technical checklist evaluation. The v2 prompt (`LIGHTROOM_PHOTO_RATING_PROMPT_V2.md`) shifts to emotional impact:
+
+- **Feel first, rules second** - Does the image make you stop scrolling?
+- **Artistic intent vs. flaws** - Eyes closed might be dreamy, not a mistake
+- **Find THE shot** - In a series of similar photos, identify the one with best timing
+
+Key instruction: *"A technically 'correct' photo that feels lifeless should score lower than an unconventional shot that captures genuine emotion."*
+
+## What I'd Do Differently (Updated)
+
+1. ~~**Batch the previews upfront**~~ Done - local script handles this
+
+2. **Add a "compare" mode**: For series of similar shots, show 3-5 side by side and pick the best
+
+3. **Stream ratings to file**: Have Claude append ratings to a JSON file as it goes, so progress isn't lost if connection drops
+
+4. **Calibration shots**: Show Claude 5-10 pre-rated examples of YOUR style before starting, so it learns what YOU consider a 5-star
 
 ## The Code
 
