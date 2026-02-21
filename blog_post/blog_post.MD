@@ -54,7 +54,7 @@ if thumb.format == rawpy.ThumbFormat.JPEG:
 
 ### Preview Size for AI Analysis
 
-800x800 or 1024x1024 works well. Big enough to see composition and expressions, small enough to not waste tokens. The previews get saved to `/tmp/lr_previews/` as JPEGs, then Claude reads them with the `Read` tool which displays images inline.
+I used 800px max dimension, which resulted in **800x533** previews (maintaining the 3:2 aspect ratio). Each file was around 60-80KB - big enough to see composition and expressions, small enough to not waste tokens. The previews get saved to `/tmp/lr_previews/` as JPEGs, then Claude reads them with the `Read` tool which displays images inline.
 
 ## The Rating Criteria
 
