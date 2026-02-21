@@ -1322,6 +1322,12 @@ def requests_page():
 
 def create_tray_icon():
     """Create and run the system tray icon."""
+    # Disable tray icon on macOS due to trace trap issues
+    import sys
+    if sys.platform == 'darwin':
+        broker_log("INFO", "Tray icon disabled on macOS")
+        return None
+    
     try:
         import pystray
         from PIL import Image, ImageDraw
